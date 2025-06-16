@@ -1,3 +1,5 @@
 python-telegram-bot==20.3
 yt_dlp
+instaloader
+facebook-scraper
 Flask
