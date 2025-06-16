@@ -5,7 +5,7 @@ import yt_dlp
 import instaloader
 from flask import Flask
 from threading import Thread
-from telegram import Update
+from telegram import Update, Document
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from facebook_scraper import get_posts
 
@@ -91,7 +91,6 @@ async def handle_instagram(url, update):
     shortcode = url.strip("/").split("/")[-1]
     sessionid = load_session()
 
-    # Use yt_dlp for public reels/videos if no session
     if not sessionid and ("/reel/" in url or "/tv/" in url or "/p/" in url):
         await handle_yt_dlp(url, update)
         return
@@ -161,10 +160,18 @@ async def delete_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No session ID found.")
 
+async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = "\U0001F512 Session Status:\n"
+    status += f"{'✅' if os.path.exists('sessionid.txt') else '❌'} Instagram session: {'FOUND' if os.path.exists('sessionid.txt') else 'NOT FOUND'}\n"
+    status += f"{'✅' if os.path.exists('cookies.json') else '❌'} Facebook cookies: {'FOUND' if os.path.exists('cookies.json') else 'NOT FOUND'}\n"
+    status += f"{'✅' if os.path.exists('youtube_cookies.txt') else '❌'} YouTube cookies: {'FOUND' if os.path.exists('youtube_cookies.txt') else 'NOT FOUND'}"
+    await update.message.reply_text(status)
+
 Thread(target=run_flask).start()
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("session", set_session))
 app.add_handler(CommandHandler("delete", delete_session))
+app.add_handler(CommandHandler("status", check_status))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 app.run_polling()
