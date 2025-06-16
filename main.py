@@ -1,114 +1,98 @@
 import os
 import re
 import yt_dlp
-import logging
 from flask import Flask
 from threading import Thread
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 
-# Logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Session file for Instagram
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 SESSION_FILE = "sessionid.txt"
 
+# Flask keep-alive server
+app_flask = Flask("keep_alive")
+
+@app_flask.route("/")
+def home():
+    return "✅ Bot is alive!"
+
+def run_flask():
+    app_flask.run(host="0.0.0.0", port=8080)
+
+# Load Instagram session ID from file
 def load_session():
     if os.path.exists(SESSION_FILE):
         with open(SESSION_FILE, "r") as f:
             return f.read().strip()
     return None
 
-def save_session(sessionid):
-    with open(SESSION_FILE, "w") as f:
-        f.write(sessionid)
+# Regex to detect supported media URLs
+URL_REGEX = r"(https?://[^\s]+(?:instagram\.com|youtube\.com|youtu\.be|tiktok\.com)[^\s]*)"
 
-def delete_session():
-    if os.path.exists(SESSION_FILE):
-        os.remove(SESSION_FILE)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable not set.")
-
-sessionid = load_session()
-
-URL_REGEX = r"(https?://[\w./?=&%-]+(?:instagram\.com|youtu\.be|youtube\.com|tiktok\.com|facebook\.com)[^\s]*)"
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    match = re.search(URL_REGEX, text)
+# Main media handler
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message.text.strip()
+    match = re.search(URL_REGEX, message)
     if not match:
-        await update.message.reply_text("❌ No supported link found.")
+        await update.message.reply_text("❌ No supported media link found.")
         return
 
     url = match.group(1)
-    await update.message.reply_text("⏳ Downloading media...")
+    await update.message.reply_text(f"📥 Downloading from:\n{url}")
 
-    os.makedirs("downloads", exist_ok=True)
     ydl_opts = {
-        'outtmpl': 'downloads/%(title).70s.%(ext)s',
-        'format': 'best',
+        'outtmpl': 'downloaded.%(ext)s',
+        'format': 'bestvideo+bestaudio/best',
+        'noplaylist': True,
         'quiet': True,
     }
 
-    if 'instagram.com' in url and sessionid:
-        ydl_opts['cookiefile'] = SESSION_FILE
-        with open(SESSION_FILE, 'w') as f:
-            f.write(f"sessionid={sessionid}")
+    if "instagram.com" in url:
+        sessionid = load_session()
+        if sessionid:
+            with open(SESSION_FILE, "w") as f:
+                f.write(f"sessionid={sessionid}")
+            ydl_opts['cookiefile'] = SESSION_FILE
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-            ydl.download([url])
 
-        if os.path.exists(filename):
-            with open(filename, 'rb') as f:
-                await update.message.reply_video(video=f)
-            os.remove(filename)
+        if filename.endswith(".mp4"):
+            await update.message.reply_video(video=open(filename, 'rb'))
         else:
-            await update.message.reply_text("⚠️ Downloaded but file not found.")
-    except Exception as e:
-        logger.error("Download error", exc_info=True)
-        await update.message.reply_text("❌ An error occurred while downloading.")
+            await update.message.reply_document(document=open(filename, 'rb'))
 
+        os.remove(filename)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error:\n{str(e)}")
+
+# /session command
 async def set_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
-        new_id = context.args[0].strip()
-        save_session(new_id)
-        global sessionid
-        sessionid = new_id
+        sessionid = context.args[0].strip()
+        with open(SESSION_FILE, "w") as f:
+            f.write(sessionid)
         await update.message.reply_text("✅ Session ID saved.")
     else:
-        await update.message.reply_text("⚠️ Usage: /session SESSIONID")
+        await update.message.reply_text("⚠️ Usage: /session YOUR_SESSION_ID")
 
-async def delete_session_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    delete_session()
-    global sessionid
-    sessionid = None
-    await update.message.reply_text("❌ Session ID deleted.")
+# /delete command
+async def delete_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if os.path.exists(SESSION_FILE):
+        os.remove(SESSION_FILE)
+        await update.message.reply_text("❌ Session ID deleted.")
+    else:
+        await update.message.reply_text("No session ID found.")
 
-# Keep-alive Flask server
-flask_app = Flask("keep_alive")
+# Start Flask keep-alive server
+Thread(target=run_flask).start()
 
-@flask_app.route("/")
-def home():
-    return "✅ Bot is running."
-
-def run_flask():
-    flask_app.run(host="0.0.0.0", port=8080)
-
-if __name__ == "__main__":
-    # Start Flask keep-alive server
-    Thread(target=run_flask).start()
-
-    # Start Telegram bot polling
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("session", set_session))
-    app.add_handler(CommandHandler("delete", delete_session_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("🤖 Bot is running...")
-    app.run_polling()
+# Start the Telegram bot
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(CommandHandler("session", set_session))
+app.add_handler(CommandHandler("delete", delete_session))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+app.run_polling()
