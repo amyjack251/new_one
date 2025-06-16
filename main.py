@@ -12,7 +12,6 @@ from facebook_scraper import get_posts
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SESSION_FILE = "sessionid.txt"
 
-# Flask keep-alive
 flask_app = Flask("keep_alive")
 
 @flask_app.route("/")
@@ -28,8 +27,7 @@ def load_session():
             return f.read().strip()
     return None
 
-# Full platform URL detection
-URL_REGEX = r"(https?://[^\s]+(?:instagram\.com|youtube\.com|youtu\.be|youtube\.com/shorts|tiktok\.com|facebook\.com|fb\.watch|m\.facebook\.com)[^\s]*)"
+URL_REGEX = r"(https?://[^\s]+(?:instagram\.com|youtube\.com|youtu\.be|tiktok\.com|facebook\.com|fb\.watch|m\.facebook\.com)[^\s]*)"
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -63,8 +61,7 @@ async def handle_yt_dlp(url, update):
         'noplaylist': False
     }
 
-    # Optional: Add cookies.txt for YouTube age-restricted
-    if "youtube.com" in url or "youtu.be" in url:
+    if any(x in url for x in ["youtube.com", "youtu.be"]):
         if os.path.exists("youtube_cookies.txt"):
             ydl_opts["cookiefile"] = "youtube_cookies.txt"
 
@@ -72,7 +69,6 @@ async def handle_yt_dlp(url, update):
         info = ydl.extract_info(url, download=True)
 
     media_files = []
-
     if "entries" in info:
         for entry in info["entries"]:
             fname = yt_dlp.utils.sanitize_filename(ydl.prepare_filename(entry))
@@ -94,27 +90,50 @@ async def handle_yt_dlp(url, update):
 async def handle_instagram(url, update):
     shortcode = url.strip("/").split("/")[-1]
     sessionid = load_session()
-    loader = instaloader.Instaloader(dirname_pattern='downloads', save_metadata=False)
 
-    if sessionid:
-        loader.context._session.cookies.set('sessionid', sessionid)
+    # Use yt_dlp for public reels/videos if no session
+    if not sessionid and ("/reel/" in url or "/tv/" in url or "/p/" in url):
+        await handle_yt_dlp(url, update)
+        return
 
-    post = instaloader.Post.from_shortcode(loader.context, shortcode)
-    loader.download_post(post, target="downloads")
+    try:
+        loader = instaloader.Instaloader(dirname_pattern='downloads', save_metadata=False)
+        post = None
 
-    for file in os.listdir("downloads"):
-        full = os.path.join("downloads", file)
-        if file.endswith((".mp4", ".webm")):
-            await update.message.reply_video(video=open(full, 'rb'))
-        elif file.endswith((".jpg", ".jpeg", ".png", ".webp")):
-            await update.message.reply_photo(photo=open(full, 'rb'))
-        else:
-            await update.message.reply_document(document=open(full, 'rb'))
-        os.remove(full)
+        if sessionid:
+            loader.context._session.cookies.set('sessionid', sessionid)
+            loader.load_session_from_file(username="placeholder", filename=SESSION_FILE)
+
+        try:
+            post = instaloader.Post.from_shortcode(loader.context, shortcode)
+        except Exception as e:
+            if not sessionid:
+                await update.message.reply_text("⚠️ Post may be private or restricted. Use /session to add login.")
+                return
+            raise e
+
+        loader.download_post(post, target="downloads")
+
+        for file in os.listdir("downloads"):
+            full = os.path.join("downloads", file)
+            if file.endswith((".mp4", ".webm")):
+                await update.message.reply_video(video=open(full, 'rb'))
+            elif file.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                await update.message.reply_photo(photo=open(full, 'rb'))
+            else:
+                await update.message.reply_document(document=open(full, 'rb'))
+            os.remove(full)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Instagram error.\n{str(e)}")
 
 async def handle_facebook(url, update):
     found = False
-    for post in get_posts(post_urls=[url], cookies="cookies.json"):
+    kwargs = {"post_urls": [url]}
+    if os.path.exists("cookies.json"):
+        kwargs["cookies"] = "cookies.json"
+
+    for post in get_posts(**kwargs):
         if post.get("video"):
             await handle_yt_dlp(url, update)
             return
@@ -124,9 +143,8 @@ async def handle_facebook(url, update):
         break
 
     if not found:
-        await update.message.reply_text("⚠️ Facebook post has no downloadable media (or is private).")
+        await update.message.reply_text("⚠️ Facebook post is private or requires login.")
 
-# /session to save IG sessionid
 async def set_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         sessionid = context.args[0].strip()
@@ -136,7 +154,6 @@ async def set_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ Usage: /session YOUR_SESSION_ID")
 
-# /delete to remove session
 async def delete_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if os.path.exists(SESSION_FILE):
         os.remove(SESSION_FILE)
@@ -144,7 +161,6 @@ async def delete_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No session ID found.")
 
-# Start Flask and bot
 Thread(target=run_flask).start()
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
