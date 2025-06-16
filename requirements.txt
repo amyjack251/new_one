@@ -3,3 +3,4 @@ yt_dlp
 instaloader
 facebook-scraper
 Flask
+lxml_html_clean
