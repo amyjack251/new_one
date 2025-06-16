@@ -2,12 +2,16 @@ import os
 import re
 import yt_dlp
 import logging
+from flask import Flask
+from threading import Thread
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Session file for Instagram
 SESSION_FILE = "sessionid.txt"
 
 def load_session():
@@ -86,9 +90,22 @@ async def delete_session_command(update: Update, context: ContextTypes.DEFAULT_T
     sessionid = None
     await update.message.reply_text("❌ Session ID deleted.")
 
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# Keep-alive Flask server
+flask_app = Flask("keep_alive")
 
+@flask_app.route("/")
+def home():
+    return "✅ Bot is running."
+
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=8080)
+
+if __name__ == "__main__":
+    # Start Flask keep-alive server
+    Thread(target=run_flask).start()
+
+    # Start Telegram bot polling
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("session", set_session))
     app.add_handler(CommandHandler("delete", delete_session_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
