@@ -1,112 +1,152 @@
 import os
 import re
+import shutil
 import yt_dlp
+import instaloader
 from flask import Flask
 from threading import Thread
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from facebook_scraper import get_posts
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SESSION_FILE = "sessionid.txt"
 
-# Flask keep-alive server
-app_flask = Flask("keep_alive")
+# Flask keep-alive
+flask_app = Flask("keep_alive")
 
-@app_flask.route("/")
+@flask_app.route("/")
 def home():
-    return "✅ Bot is alive!"
+    return "✅ Bot is alive"
 
 def run_flask():
-    app_flask.run(host="0.0.0.0", port=8080)
+    flask_app.run(host="0.0.0.0", port=8080)
 
-# Load Instagram session ID
 def load_session():
     if os.path.exists(SESSION_FILE):
         with open(SESSION_FILE, "r") as f:
             return f.read().strip()
     return None
 
-# Updated URL regex for all platforms
+# Full platform URL detection
 URL_REGEX = r"(https?://[^\s]+(?:instagram\.com|youtube\.com|youtu\.be|youtube\.com/shorts|tiktok\.com|facebook\.com|fb\.watch|m\.facebook\.com)[^\s]*)"
 
-# Main download handler
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message.text.strip()
-    match = re.search(URL_REGEX, message)
+    text = update.message.text.strip()
+    match = re.search(URL_REGEX, text)
     if not match:
         await update.message.reply_text("❌ No supported media link found.")
         return
 
     url = match.group(1)
-    await update.message.reply_text(f"📥 Downloading from:\n{url}")
+    await update.message.reply_text("⏳ Downloading...")
 
-    # yt_dlp options
-    ydl_opts = {
-        'outtmpl': 'downloaded_%(title).70s.%(ext)s',
-        'format': 'bestvideo+bestaudio/best',
-        'quiet': True,
-        'noplaylist': False  # ✅ support YouTube playlists and IG carousels
-    }
-
-    # Add Instagram session cookie if needed
-    if "instagram.com" in url:
-        sessionid = load_session()
-        if sessionid:
-            with open(SESSION_FILE, "w") as f:
-                f.write(f"sessionid={sessionid}")
-            ydl_opts['cookiefile'] = SESSION_FILE
+    os.makedirs("downloads", exist_ok=True)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-
-        media_files = []
-
-        if "entries" in info:
-            for entry in info["entries"]:
-                fname = yt_dlp.utils.sanitize_filename(ydl.prepare_filename(entry))
-                media_files.append(fname)
+        if "instagram.com" in url:
+            await handle_instagram(url, update)
+        elif "facebook.com" in url or "fb.watch" in url:
+            await handle_facebook(url, update)
         else:
-            fname = yt_dlp.utils.sanitize_filename(ydl.prepare_filename(info))
-            media_files.append(fname)
-
-        for file in media_files:
-            ext = file.split(".")[-1].lower()
-
-            if ext in ["mp4", "webm", "mov"]:
-                await update.message.reply_video(video=open(file, 'rb'))
-            elif ext in ["jpg", "jpeg", "png", "webp"]:
-                await update.message.reply_photo(photo=open(file, 'rb'))
-            else:
-                await update.message.reply_document(document=open(file, 'rb'))
-
-            os.remove(file)
-
+            await handle_yt_dlp(url, update)
     except Exception as e:
         await update.message.reply_text(f"❌ Error:\n{str(e)}")
 
-# /session command to save Instagram session ID
+    shutil.rmtree("downloads", ignore_errors=True)
+
+async def handle_yt_dlp(url, update):
+    ydl_opts = {
+        'outtmpl': 'downloads/%(title).70s.%(ext)s',
+        'format': 'bestvideo+bestaudio/best',
+        'quiet': True,
+        'noplaylist': False
+    }
+
+    # Optional: Add cookies.txt for YouTube age-restricted
+    if "youtube.com" in url or "youtu.be" in url:
+        if os.path.exists("youtube_cookies.txt"):
+            ydl_opts["cookiefile"] = "youtube_cookies.txt"
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+    media_files = []
+
+    if "entries" in info:
+        for entry in info["entries"]:
+            fname = yt_dlp.utils.sanitize_filename(ydl.prepare_filename(entry))
+            media_files.append(fname)
+    else:
+        fname = yt_dlp.utils.sanitize_filename(ydl.prepare_filename(info))
+        media_files.append(fname)
+
+    for file in media_files:
+        ext = file.split(".")[-1].lower()
+        if ext in ["mp4", "webm"]:
+            await update.message.reply_video(video=open(file, 'rb'))
+        elif ext in ["jpg", "jpeg", "png"]:
+            await update.message.reply_photo(photo=open(file, 'rb'))
+        else:
+            await update.message.reply_document(document=open(file, 'rb'))
+        os.remove(file)
+
+async def handle_instagram(url, update):
+    shortcode = url.strip("/").split("/")[-1]
+    sessionid = load_session()
+    loader = instaloader.Instaloader(dirname_pattern='downloads', save_metadata=False)
+
+    if sessionid:
+        loader.context._session.cookies.set('sessionid', sessionid)
+
+    post = instaloader.Post.from_shortcode(loader.context, shortcode)
+    loader.download_post(post, target="downloads")
+
+    for file in os.listdir("downloads"):
+        full = os.path.join("downloads", file)
+        if file.endswith((".mp4", ".webm")):
+            await update.message.reply_video(video=open(full, 'rb'))
+        elif file.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            await update.message.reply_photo(photo=open(full, 'rb'))
+        else:
+            await update.message.reply_document(document=open(full, 'rb'))
+        os.remove(full)
+
+async def handle_facebook(url, update):
+    found = False
+    for post in get_posts(post_urls=[url], cookies="cookies.json"):
+        if post.get("video"):
+            await handle_yt_dlp(url, update)
+            return
+        elif post.get("image"):
+            found = True
+            await update.message.reply_photo(photo=post["image"])
+        break
+
+    if not found:
+        await update.message.reply_text("⚠️ Facebook post has no downloadable media (or is private).")
+
+# /session to save IG sessionid
 async def set_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         sessionid = context.args[0].strip()
         with open(SESSION_FILE, "w") as f:
             f.write(sessionid)
-        await update.message.reply_text("✅ Session ID saved.")
+        await update.message.reply_text("✅ Instagram session ID saved.")
     else:
         await update.message.reply_text("⚠️ Usage: /session YOUR_SESSION_ID")
 
-# /delete command to clear session ID
+# /delete to remove session
 async def delete_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if os.path.exists(SESSION_FILE):
         os.remove(SESSION_FILE)
-        await update.message.reply_text("❌ Session ID deleted.")
+        await update.message.reply_text("❌ Instagram session ID deleted.")
     else:
         await update.message.reply_text("No session ID found.")
 
-# Start Flask keep-alive server
+# Start Flask and bot
 Thread(target=run_flask).start()
 
-# Start Telegram bot
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("session", set_session))
 app.add_handler(CommandHandler("delete", delete_session))
