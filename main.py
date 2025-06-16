@@ -19,17 +19,17 @@ def home():
 def run_flask():
     app_flask.run(host="0.0.0.0", port=8080)
 
-# Load Instagram session ID from file
+# Load Instagram session ID
 def load_session():
     if os.path.exists(SESSION_FILE):
         with open(SESSION_FILE, "r") as f:
             return f.read().strip()
     return None
 
-# Regex to detect supported media URLs
-URL_REGEX = r"(https?://[^\s]+(?:instagram\.com|youtube\.com|youtu\.be|tiktok\.com)[^\s]*)"
+# Updated URL regex for all platforms
+URL_REGEX = r"(https?://[^\s]+(?:instagram\.com|youtube\.com|youtu\.be|youtube\.com/shorts|tiktok\.com|facebook\.com|fb\.watch|m\.facebook\.com)[^\s]*)"
 
-# Main media handler
+# Main download handler
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text.strip()
     match = re.search(URL_REGEX, message)
@@ -40,13 +40,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = match.group(1)
     await update.message.reply_text(f"📥 Downloading from:\n{url}")
 
+    # yt_dlp options
     ydl_opts = {
-        'outtmpl': 'downloaded.%(ext)s',
+        'outtmpl': 'downloaded_%(title).70s.%(ext)s',
         'format': 'bestvideo+bestaudio/best',
-        'noplaylist': True,
         'quiet': True,
+        'noplaylist': False  # ✅ support YouTube playlists and IG carousels
     }
 
+    # Add Instagram session cookie if needed
     if "instagram.com" in url:
         sessionid = load_session()
         if sessionid:
@@ -57,19 +59,33 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
 
-        if filename.endswith(".mp4"):
-            await update.message.reply_video(video=open(filename, 'rb'))
+        media_files = []
+
+        if "entries" in info:
+            for entry in info["entries"]:
+                fname = yt_dlp.utils.sanitize_filename(ydl.prepare_filename(entry))
+                media_files.append(fname)
         else:
-            await update.message.reply_document(document=open(filename, 'rb'))
+            fname = yt_dlp.utils.sanitize_filename(ydl.prepare_filename(info))
+            media_files.append(fname)
 
-        os.remove(filename)
+        for file in media_files:
+            ext = file.split(".")[-1].lower()
+
+            if ext in ["mp4", "webm", "mov"]:
+                await update.message.reply_video(video=open(file, 'rb'))
+            elif ext in ["jpg", "jpeg", "png", "webp"]:
+                await update.message.reply_photo(photo=open(file, 'rb'))
+            else:
+                await update.message.reply_document(document=open(file, 'rb'))
+
+            os.remove(file)
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error:\n{str(e)}")
 
-# /session command
+# /session command to save Instagram session ID
 async def set_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         sessionid = context.args[0].strip()
@@ -79,7 +95,7 @@ async def set_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ Usage: /session YOUR_SESSION_ID")
 
-# /delete command
+# /delete command to clear session ID
 async def delete_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if os.path.exists(SESSION_FILE):
         os.remove(SESSION_FILE)
@@ -90,7 +106,7 @@ async def delete_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Start Flask keep-alive server
 Thread(target=run_flask).start()
 
-# Start the Telegram bot
+# Start Telegram bot
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("session", set_session))
 app.add_handler(CommandHandler("delete", delete_session))
